@@ -155,6 +155,141 @@ router.post("/", async (req, res) => {
 });
 
 /**
+ * GET /api/lessons/mine?userId=...
+ * -----------------------------------------------------------------------
+ * Powers /dashboard/my-lessons — every lesson (Public AND Private) that
+ * this user created, newest first. Must be registered BEFORE the
+ * GET /:id route below, or Express will treat "mine" as an :id value.
+ */
+router.get("/mine", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) {
+      return res.status(401).json({ error: "You must be logged in to view your lessons." });
+    }
+
+    const db = await getDb();
+    const lessons = await db
+      .collection("lessons")
+      .find({ creatorId: userId })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.json({ lessons });
+  } catch (err) {
+    console.error("GET /api/lessons/mine failed:", err);
+    res.status(500).json({ error: "Couldn't load your lessons." });
+  }
+});
+
+/**
+ * PATCH /api/lessons/:id/visibility
+ * -----------------------------------------------------------------------
+ * Toggles Public/Private. Owner-only.
+ */
+router.patch("/:id/visibility", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userId, visibility } = req.body;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ error: "Invalid lesson id." });
+    }
+    if (!["Public", "Private"].includes(visibility)) {
+      return res.status(400).json({ error: "Visibility must be Public or Private." });
+    }
+
+    const db = await getDb();
+    const lesson = await db.collection("lessons").findOne({ _id: new ObjectId(id) });
+    if (!lesson) return res.status(404).json({ error: "Lesson not found." });
+    if (lesson.creatorId !== userId) {
+      return res.status(403).json({ error: "You can only edit your own lessons." });
+    }
+
+    await db
+      .collection("lessons")
+      .updateOne({ _id: lesson._id }, { $set: { visibility, updatedAt: new Date() } });
+
+    res.json({ success: true, visibility });
+  } catch (err) {
+    console.error("PATCH /api/lessons/:id/visibility failed:", err);
+    res.status(500).json({ error: "Couldn't update visibility." });
+  }
+});
+
+/**
+ * PATCH /api/lessons/:id/access-level
+ * -----------------------------------------------------------------------
+ * Toggles Free/Premium. Owner-only, AND only if the request says the
+ * user is Premium — mirrors the same defensive check used in Add
+ * Lesson. TEMPORARY: `isPremium` is trusted from the request body here,
+ * same caveat as the rest of this file (Challenge 2 will replace this
+ * with a real server-side check).
+ */
+router.patch("/:id/access-level", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userId, isPremium, accessLevel } = req.body;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ error: "Invalid lesson id." });
+    }
+    if (!["Free", "Premium"].includes(accessLevel)) {
+      return res.status(400).json({ error: "Access level must be Free or Premium." });
+    }
+    if (accessLevel === "Premium" && !isPremium) {
+      return res.status(403).json({ error: "Upgrade to Premium to create paid lessons." });
+    }
+
+    const db = await getDb();
+    const lesson = await db.collection("lessons").findOne({ _id: new ObjectId(id) });
+    if (!lesson) return res.status(404).json({ error: "Lesson not found." });
+    if (lesson.creatorId !== userId) {
+      return res.status(403).json({ error: "You can only edit your own lessons." });
+    }
+
+    await db
+      .collection("lessons")
+      .updateOne({ _id: lesson._id }, { $set: { accessLevel, updatedAt: new Date() } });
+
+    res.json({ success: true, accessLevel });
+  } catch (err) {
+    console.error("PATCH /api/lessons/:id/access-level failed:", err);
+    res.status(500).json({ error: "Couldn't update access level." });
+  }
+});
+
+/**
+ * DELETE /api/lessons/:id
+ * -----------------------------------------------------------------------
+ * Owner-only permanent delete. Also cleans up any favorites/comments
+ * pointing at this lesson, so nothing is left dangling.
+ */
+router.delete("/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { userId } = req.body;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ error: "Invalid lesson id." });
+    }
+
+    const db = await getDb();
+    const lesson = await db.collection("lessons").findOne({ _id: new ObjectId(id) });
+    if (!lesson) return res.status(404).json({ error: "Lesson not found." });
+    if (lesson.creatorId !== userId) {
+      return res.status(403).json({ error: "You can only delete your own lessons." });
+    }
+
+    await db.collection("lessons").deleteOne({ _id: lesson._id });
+    await db.collection("favorites").deleteMany({ lessonId: id });
+    await db.collection("comments").deleteMany({ lessonId: id });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("DELETE /api/lessons/:id failed:", err);
+    res.status(500).json({ error: "Couldn't delete the lesson." });
+  }
+});
+
+/**
  * GET /api/lessons/:id
  * -----------------------------------------------------------------------
  * Powers the Lesson Details page. Optionally pass ?userId=... so the
