@@ -4,8 +4,10 @@ const { getDb } = require("../Db");
 const { createRemoteJWKSet, jwtVerify } = require("jose");
 const router = express.Router();
 
+const CLIENT_URL = process.env.CLIENT_URL?.replace(/\/$/, "");
+
 const JWKS = createRemoteJWKSet(
-  new URL(`https://${process.env.CLIENT_URL}/api/auth/jwks`)
+  new URL(`${CLIENT_URL}/api/auth/jwks`)
 );
 
 async function verifyToken(req, res, next) {
@@ -20,8 +22,8 @@ async function verifyToken(req, res, next) {
     }
 
     const { payload } = await jwtVerify(token, JWKS, {
-      issuer: `https://${process.env.CLIENT_URL}`,
-      audience: `https://${process.env.CLIENT_URL}`,
+     issuer: CLIENT_URL,
+audience: CLIENT_URL,
     });
 
     req.userId = payload.id;
@@ -34,10 +36,6 @@ async function verifyToken(req, res, next) {
     return res.status(401).json({ error: "Invalid or expired token." });
   }
 }
-
-// For public routes that behave slightly differently when a viewer IS
-// logged in (Lesson Details' viewerHasLiked/viewerHasSaved), but must
-// never reject an anonymous request outright.
 async function optionalVerifyToken(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) return next();
