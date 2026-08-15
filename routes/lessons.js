@@ -1,6 +1,6 @@
 const express = require("express");
 const { ObjectId } = require("mongodb");
-const { getDb } = require("../db");
+const { getDb } = require("../Db");
 
 const router = express.Router();
 
@@ -30,10 +30,12 @@ router.get("/", async (req, res) => {
       page = "1",
       limit = "6",
     } = req.query;
+    const { featured = "" } = req.query;
 
     const query = { visibility: "Public" };
     if (category && category !== "All") query.category = category;
     if (tone && tone !== "All") query.emotionalTone = tone;
+    if (featured === "true") query.isFeatured = true;
     if (search.trim()) {
       const regex = { $regex: search.trim(), $options: "i" };
       query.$or = [{ title: regex }, { description: regex }];
