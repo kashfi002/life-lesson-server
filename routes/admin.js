@@ -4,22 +4,6 @@ const { getDb } = require("../Db");
 
 const router = express.Router();
 
-/**
- * Every /api/admin/* route requires ?adminId=... (GET) or { adminId }
- * (POST/PATCH/DELETE body). We look the user up by _id and check
- * role === "admin" server-side — we do NOT trust a `role` field sent
- * from the client, since that would be trivial to spoof from DevTools.
- *
- * IMPORTANT: better-auth's mongodb adapter stores the primary key as
- * _id (a native ObjectId) on the raw document. The "id" string you get
- * from useSession() only exists after better-auth's own transform
- * layer — querying the raw collection directly means querying by _id,
- * not by a field called "id" (which doesn't exist on the document).
- *
- * TEMPORARY: same caveat as lessons.js — once Challenge 2 (real token
- * verification) is in place, replace this with reading the verified
- * user off the request instead of a client-supplied adminId.
- */
 async function requireAdmin(req, res, next) {
   try {
     const adminId = req.query.adminId || req.body?.adminId;
@@ -41,12 +25,6 @@ async function requireAdmin(req, res, next) {
 
 router.use(requireAdmin);
 
-/**
- * Buckets documents in `collectionName` by day for the last 7 days,
- * zero-filling days with no activity. Powers the growth charts on the
- * admin dashboard home. Shape matches the { day, count } your
- * DashboardHomePage weekly chart already expects.
- */
 async function countsByDayLast7(db, collectionName, dateField) {
   const since = new Date();
   since.setHours(0, 0, 0, 0);
@@ -80,12 +58,6 @@ async function countsByDayLast7(db, collectionName, dateField) {
   return days;
 }
 
-/**
- * GET /api/admin/stats?adminId=...
- * -----------------------------------------------------------------------
- * Powers /dashboard/admin — totals, most active contributors, today's
- * new lessons, and lesson/user growth over the last 7 days.
- */
 router.get("/stats", async (req, res) => {
   try {
     const db = req.db;
@@ -140,15 +112,6 @@ router.get("/stats", async (req, res) => {
   }
 });
 
-/**
- * GET /api/admin/users?adminId=...
- * -----------------------------------------------------------------------
- * Powers /dashboard/admin/manage-users. Every user, plus how many
- * lessons each has created. `id` in the response is derived from _id
- * (see the note on requireAdmin above) so it matches the string form
- * of the id the frontend already uses everywhere else (session.user.id,
- * lesson.creatorId, etc).
- */
 router.get("/users", async (req, res) => {
   try {
     const db = req.db;
@@ -179,13 +142,6 @@ router.get("/users", async (req, res) => {
     res.status(500).json({ error: "Couldn't load users." });
   }
 });
-
-/**
- * PATCH /api/admin/users/:id/role
- * -----------------------------------------------------------------------
- * Promote/demote a user. :id is the string form of the user's Mongo
- * _id (same string the frontend already gets as session.user.id).
- */
 router.patch("/users/:id/role", async (req, res) => {
   try {
     const { id } = req.params;
@@ -212,13 +168,6 @@ router.patch("/users/:id/role", async (req, res) => {
   }
 });
 
-/**
- * DELETE /api/admin/users/:id
- * -----------------------------------------------------------------------
- * Optional per the PDF. Deletes the user document only — their existing
- * lessons/favorites/comments are left as-is (no cascade), since the
- * spec doesn't call for cascading here the way lesson delete does.
- */
 router.delete("/users/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -237,13 +186,6 @@ router.delete("/users/:id", async (req, res) => {
   }
 });
 
-/**
- * GET /api/admin/lessons?adminId=...&category=&visibility=&flagged=true
- * -----------------------------------------------------------------------
- * Powers /dashboard/admin/manage-lessons. Every lesson from every user,
- * with a computed reportCount, plus the three stat counts the page
- * needs (public / private / flagged).
- */
 router.get("/lessons", async (req, res) => {
   try {
     const db = req.db;
@@ -290,14 +232,6 @@ router.get("/lessons", async (req, res) => {
     res.status(500).json({ error: "Couldn't load lessons." });
   }
 });
-
-/**
- * PATCH /api/admin/lessons/:id/featured
- * PATCH /api/admin/lessons/:id/reviewed
- * -----------------------------------------------------------------------
- * Toggle isFeatured (shows on the homepage Featured section) and
- * isReviewed independently.
- */
 router.patch("/lessons/:id/featured", async (req, res) => {
   try {
     const { id } = req.params;
@@ -336,13 +270,6 @@ router.patch("/lessons/:id/reviewed", async (req, res) => {
   }
 });
 
-/**
- * DELETE /api/admin/lessons/:id
- * -----------------------------------------------------------------------
- * Admin delete — bypasses the ownership check that lessons.js's
- * DELETE /:id enforces for regular users. Same cascade cleanup
- * (favorites, comments, reports) as that route.
- */
 router.delete("/lessons/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -362,15 +289,6 @@ router.delete("/lessons/:id", async (req, res) => {
     res.status(500).json({ error: "Couldn't delete lesson." });
   }
 });
-
-/**
- * GET /api/admin/reports?adminId=...
- * -----------------------------------------------------------------------
- * Powers /dashboard/admin/reported-lessons. Groups lessonsReports by
- * lessonId, joins the lesson title, and includes the full list of
- * individual reports (reason + reporter info) for the "view all
- * reasons" modal.
- */
 router.get("/reports", async (req, res) => {
   try {
     const db = req.db;
@@ -410,12 +328,6 @@ router.get("/reports", async (req, res) => {
   }
 });
 
-/**
- * DELETE /api/admin/reports/:lessonId
- * -----------------------------------------------------------------------
- * "Delete Lesson" action from the reports table — permanently removes
- * the reported lesson (same cascade as the manage-lessons delete).
- */
 router.delete("/reports/:lessonId", async (req, res) => {
   try {
     const { lessonId } = req.params;
@@ -433,12 +345,6 @@ router.delete("/reports/:lessonId", async (req, res) => {
     res.status(500).json({ error: "Couldn't delete lesson." });
   }
 });
-
-/**
- * POST /api/admin/reports/:lessonId/ignore
- * -----------------------------------------------------------------------
- * "Ignore" action — keeps the lesson live, clears all its reports.
- */
 router.post("/reports/:lessonId/ignore", async (req, res) => {
   try {
     const { lessonId } = req.params;
