@@ -1,24 +1,66 @@
 const express = require("express");
 const { ObjectId } = require("mongodb");
 const { getDb } = require("../Db");
-
+const { createRemoteJWKSet, jwtVerify } = require("jose");
 const router = express.Router();
 
-/**
- * GET /api/lessons
- * -----------------------------------------------------------------------
- * Public — no login required, matches the PDF's "anyone (logged-in or
- * not) can browse public lessons." Supports:
- *
- *   ?search=keyword       matches title OR description (case-insensitive)
- *   ?category=Career      one of the 5 fixed categories, or omitted/"All"
- *   ?tone=Motivational    one of the 4 fixed tones, or omitted/"All"
- *   ?sort=newest|mostSaved
- *   ?page=1&limit=6       pagination
- *
- * Returns { lessons, total, page, totalPages } so the frontend can
- * render page-number controls without a second request.
- */
+const JWKS = createRemoteJWKSet(
+  new URL(`https://${process.env.CLIENT_URL}/api/auth/jwks`)
+);
+
+async function verifyToken(req, res, next) {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    const token = authHeader.split(" ")[1];
+    if (!token) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const { payload } = await jwtVerify(token, JWKS, {
+      issuer: `https://${process.env.CLIENT_URL}`,
+      audience: `https://${process.env.CLIENT_URL}`,
+    });
+
+    req.userId = payload.id;
+    req.userEmail = payload.email;
+    req.userRole = payload.role;
+    req.userIsPremium = Boolean(payload.isPremium);
+    next();
+  } catch (err) {
+    console.error("verifyToken failed:", err.message);
+    return res.status(401).json({ error: "Invalid or expired token." });
+  }
+}
+
+// For public routes that behave slightly differently when a viewer IS
+// logged in (Lesson Details' viewerHasLiked/viewerHasSaved), but must
+// never reject an anonymous request outright.
+async function optionalVerifyToken(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) return next();
+  const token = authHeader.split(" ")[1];
+  if (!token) return next();
+
+  try {
+    const { payload } = await jwtVerify(token, JWKS, {
+      issuer: `https://${process.env.CLIENT_URL}`,
+      audience: `https://${process.env.CLIENT_URL}`,
+    });
+    req.userId = payload.id;
+    req.userEmail = payload.email;
+    req.userRole = payload.role;
+    req.userIsPremium = Boolean(payload.isPremium);
+  } catch (err) {
+    console.error("optionalVerifyToken: ignoring invalid token —", err.message);
+  }
+  next();
+}
+
+module.exports = { verifyToken, optionalVerifyToken };
+
 router.get("/", async (req, res) => {
   try {
     const db = await getDb();
@@ -74,25 +116,7 @@ router.get("/", async (req, res) => {
   }
 });
 
-/**
- * POST /api/lessons
- * -----------------------------------------------------------------------
- * Saves everything from the Add Lesson form, plus who posted it.
- *
- * Expected body (from the frontend's AddLessonPage):
- *   {
- *     title, description, category, emotionalTone, image,
- *     visibility, accessLevel,
- *     creatorId, creatorName, creatorEmail, creatorImage
- *   }
- *
- * TEMPORARY: creatorId/creatorName/creatorEmail are trusted from the
- * request body for now. Once you build real token verification
- * (Challenge 2), replace this with reading the verified user off the
- * request instead of trusting these fields directly — right now
- * someone could spoof a different name via DevTools.
- */
-router.post("/", async (req, res) => {
+router.post("/", verifyToken, async (req, res) => {
   try {
     const {
       title,
@@ -156,14 +180,7 @@ router.post("/", async (req, res) => {
   }
 });
 
-/**
- * GET /api/lessons/mine?userId=...
- * -----------------------------------------------------------------------
- * Powers /dashboard/my-lessons — every lesson (Public AND Private) that
- * this user created, newest first. Must be registered BEFORE the
- * GET /:id route below, or Express will treat "mine" as an :id value.
- */
-router.get("/mine", async (req, res) => {
+router.get("/mine", verifyToken, async (req, res) => {
   try {
     const { userId } = req.query;
     if (!userId) {
@@ -183,13 +200,7 @@ router.get("/mine", async (req, res) => {
     res.status(500).json({ error: "Couldn't load your lessons." });
   }
 });
-
-/**
- * PATCH /api/lessons/:id/visibility
- * -----------------------------------------------------------------------
- * Toggles Public/Private. Owner-only.
- */
-router.patch("/:id/visibility", async (req, res) => {
+router.patch("/:id/visibility", verifyToken, async (req, res) => {
   try {
     const { id } = req.params;
     const { userId, visibility } = req.body;
@@ -217,17 +228,7 @@ router.patch("/:id/visibility", async (req, res) => {
     res.status(500).json({ error: "Couldn't update visibility." });
   }
 });
-
-/**
- * PATCH /api/lessons/:id/access-level
- * -----------------------------------------------------------------------
- * Toggles Free/Premium. Owner-only, AND only if the request says the
- * user is Premium — mirrors the same defensive check used in Add
- * Lesson. TEMPORARY: `isPremium` is trusted from the request body here,
- * same caveat as the rest of this file (Challenge 2 will replace this
- * with a real server-side check).
- */
-router.patch("/:id/access-level", async (req, res) => {
+router.patch("/:id/access-level", verifyToken, async (req, res) => {
   try {
     const { id } = req.params;
     const { userId, isPremium, accessLevel } = req.body;
@@ -257,15 +258,8 @@ router.patch("/:id/access-level", async (req, res) => {
     console.error("PATCH /api/lessons/:id/access-level failed:", err);
     res.status(500).json({ error: "Couldn't update access level." });
   }
-});
-
-/**
- * DELETE /api/lessons/:id
- * -----------------------------------------------------------------------
- * Owner-only permanent delete. Also cleans up any favorites/comments
- * pointing at this lesson, so nothing is left dangling.
- */
-router.delete("/:id", async (req, res) => {
+})
+router.delete("/:id", verifyToken, async (req, res) => {
   try {
     const { id } = req.params;
     const { userId } = req.body;
@@ -291,19 +285,7 @@ router.delete("/:id", async (req, res) => {
   }
 });
 
-/**
- * GET /api/lessons/:id
- * -----------------------------------------------------------------------
- * Powers the Lesson Details page. Optionally pass ?userId=... so the
- * response tells the frontend whether *this* viewer already liked/saved
- * it — saves a second round trip on page load.
- *
- * `views` is a deterministic pseudo-random number seeded from the
- * lesson's own id, per the PDF's "static random value" — deterministic
- * so it doesn't jump around on every reload, since nothing is actually
- * tracking real views yet.
- */
-router.get("/:id", async (req, res) => {
+router.get("/:id", verifyToken, async (req, res) => {
   try {
     const { id } = req.params;
     const { userId } = req.query;
@@ -338,15 +320,7 @@ router.get("/:id", async (req, res) => {
   }
 });
 
-/**
- * POST /api/lessons/:id/like
- * -----------------------------------------------------------------------
- * Toggles the given userId in/out of the lesson's likes[] array and
- * keeps likesCount in sync. TEMPORARY: userId is trusted from the
- * request body, same caveat as the rest of this file — real
- * verification comes with Challenge 2.
- */
-router.post("/:id/like", async (req, res) => {
+router.post("/:id/like", verifyToken, async (req, res) => {
   try {
     const { id } = req.params;
     const { userId } = req.body;
@@ -379,15 +353,7 @@ router.post("/:id/like", async (req, res) => {
     res.status(500).json({ error: "Couldn't update like." });
   }
 });
-
-/**
- * POST /api/lessons/:id/favorite
- * -----------------------------------------------------------------------
- * Toggles a { userId, lessonId } document in the separate `favorites`
- * collection (matches the PDF's suggested schema) and keeps the
- * lesson's favoritesCount in sync alongside it.
- */
-router.post("/:id/favorite", async (req, res) => {
+router.post("/:id/favorite", verifyToken, async (req, res) => {
   try {
     const { id } = req.params;
     const { userId } = req.body;
@@ -420,13 +386,7 @@ router.post("/:id/favorite", async (req, res) => {
   }
 });
 
-/**
- * POST /api/lessons/:id/report
- * -----------------------------------------------------------------------
- * Creates one document in `lessonsReports`, matching the PDF's schema:
- * lessonId, reporterUserId, reportedUserEmail, reason, timestamp.
- */
-router.post("/:id/report", async (req, res) => {
+router.post("/:id/report", verifyToken, async (req, res) => {
   try {
     const { id } = req.params;
     const { reporterUserId, reportedUserEmail, reason } = req.body;
@@ -455,14 +415,7 @@ router.post("/:id/report", async (req, res) => {
     res.status(500).json({ error: "Couldn't submit the report." });
   }
 });
-
-/**
- * GET /api/lessons/:id/comments
- * POST /api/lessons/:id/comments
- * -----------------------------------------------------------------------
- * Simple flat comment list per lesson, newest first.
- */
-router.get("/:id/comments", async (req, res) => {
+router.get("/:id/comments", verifyToken, async (req, res) => {
   try {
     const { id } = req.params;
     const db = await getDb();
@@ -478,7 +431,7 @@ router.get("/:id/comments", async (req, res) => {
   }
 });
 
-router.post("/:id/comments", async (req, res) => {
+router.post("/:id/comments", verifyToken, async (req, res) => {
   try {
     const { id } = req.params;
     const { userId, userName, userImage, text } = req.body;
