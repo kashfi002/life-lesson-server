@@ -5,7 +5,7 @@ const cors = require("cors");
 const lessonsRouter = require("./routes/lessons");
 const favoritesRouter = require("./routes/favorites");
 const adminRouter = require("./routes/admin");
-
+const dashboardRouter = require("./routes/dashboard");
 const app = express();
 app.use(
   cors({
@@ -18,7 +18,7 @@ app.use(express.json());
 app.use("/api/lessons", lessonsRouter);
 app.use("/api/favorites", favoritesRouter);
 app.use("/api/admin", adminRouter);
-
+app.use("/api/dashboard", dashboardRouter);
 app.get("/", (req, res) => {
   res.send("Digital Life Lessons API is running.");
 });
