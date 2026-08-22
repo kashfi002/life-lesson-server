@@ -7,10 +7,6 @@ const favoritesRouter = require("./routes/favorites");
 const adminRouter = require("./routes/admin");
 
 const app = express();
-
-// Allows your Next.js frontend (running on a different port/domain) to
-// call this API. Set CLIENT_URL in .env to your actual frontend URL —
-// for local dev that's usually http://localhost:3000.
 app.use(
   cors({
     origin: process.env.CLIENT_URL || "http://localhost:3000",
@@ -28,6 +24,10 @@ app.get("/", (req, res) => {
 });
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-});
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+}
+
+module.exports = app;
