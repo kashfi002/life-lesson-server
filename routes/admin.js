@@ -1,8 +1,22 @@
 const express = require("express");
 const { ObjectId } = require("mongodb");
 const { getDb } = require("../Db");
-
 const router = express.Router();
+const { verifyToken } = require("../middleware/verifyToken");
+const wrap = (fn) => async (req, res) => {
+  try {
+    await fn(req, res);
+  } catch (err) {
+    console.error(`${req.method} ${req.originalUrl} failed:`, err);
+    res.status(500).json({ error: "Something went wrong." });
+  }
+};
+
+const isValidId = (id, res, label = "lesson") => {
+  if (ObjectId.isValid(id)) return true;
+  res.status(400).json({ error: `Invalid ${label} id.` });
+  return false;
+};
 
 async function requireAdmin(req, res, next) {
   try {
@@ -23,6 +37,10 @@ async function requireAdmin(req, res, next) {
   }
 }
 
+// Both run for every route below: verifyToken confirms the request carries
+// a real, logged-in user; requireAdmin then confirms adminId (still passed
+// separately via query/body) actually belongs to a user with role "admin".
+router.use(verifyToken);
 router.use(requireAdmin);
 
 async function countsByDayLast7(db, collectionName, dateField) {
@@ -34,12 +52,7 @@ async function countsByDayLast7(db, collectionName, dateField) {
     .collection(collectionName)
     .aggregate([
       { $match: { [dateField]: { $gte: since } } },
-      {
-        $group: {
-          _id: { $dateToString: { format: "%Y-%m-%d", date: `$${dateField}` } },
-          count: { $sum: 1 },
-        },
-      },
+      { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: `$${dateField}` } }, count: { $sum: 1 } } },
     ])
     .toArray();
 
@@ -50,52 +63,49 @@ async function countsByDayLast7(db, collectionName, dateField) {
     d.setHours(0, 0, 0, 0);
     d.setDate(d.getDate() - i);
     const key = d.toISOString().slice(0, 10);
-    days.push({
-      day: d.toLocaleDateString("en-US", { weekday: "short" }),
-      count: byDate[key] || 0,
-    });
+    days.push({ day: d.toLocaleDateString("en-US", { weekday: "short" }), count: byDate[key] || 0 });
   }
   return days;
 }
 
-router.get("/stats", async (req, res) => {
-  try {
-    const db = req.db;
+// Shared by lesson deletion (admin.delete /lessons/:id) and report
+// deletion (admin.delete /reports/:lessonId) — both wipe a lesson plus
+// everything that references it.
+async function purgeLesson(db, id, { deleteLessonDoc = true } = {}) {
+  await Promise.all([
+    deleteLessonDoc ? db.collection("lessons").deleteOne({ _id: new ObjectId(id) }) : Promise.resolve({ deletedCount: 1 }),
+    db.collection("favorites").deleteMany({ lessonId: id }),
+    db.collection("comments").deleteMany({ lessonId: id }),
+    db.collection("lessonsReports").deleteMany({ lessonId: id }),
+  ]);
+}
 
+// ---------- stats ----------
+
+router.get(
+  "/stats",
+  wrap(async (req, res) => {
+    const db = req.db;
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
 
-    const [
-      totalUsers,
-      totalPublicLessons,
-      reportedLessonIds,
-      todaysNewLessons,
-      mostActiveContributors,
-      lessonGrowth,
-      userGrowth,
-    ] = await Promise.all([
-      db.collection("user").countDocuments({}),
-      db.collection("lessons").countDocuments({ visibility: "Public" }),
-      db.collection("lessonsReports").distinct("lessonId"),
-      db.collection("lessons").countDocuments({ createdAt: { $gte: startOfToday } }),
-      db
-        .collection("lessons")
-        .aggregate([
-          {
-            $group: {
-              _id: "$creatorId",
-              creatorName: { $first: "$creatorName" },
-              creatorImage: { $first: "$creatorImage" },
-              lessonCount: { $sum: 1 },
-            },
-          },
-          { $sort: { lessonCount: -1 } },
-          { $limit: 5 },
-        ])
-        .toArray(),
-      countsByDayLast7(db, "lessons", "createdAt"),
-      countsByDayLast7(db, "user", "createdAt"),
-    ]);
+    const [totalUsers, totalPublicLessons, reportedLessonIds, todaysNewLessons, mostActiveContributors, lessonGrowth, userGrowth] =
+      await Promise.all([
+        db.collection("user").countDocuments({}),
+        db.collection("lessons").countDocuments({ visibility: "Public" }),
+        db.collection("lessonsReports").distinct("lessonId"),
+        db.collection("lessons").countDocuments({ createdAt: { $gte: startOfToday } }),
+        db
+          .collection("lessons")
+          .aggregate([
+            { $group: { _id: "$creatorId", creatorName: { $first: "$creatorName" }, creatorImage: { $first: "$creatorImage" }, lessonCount: { $sum: 1 } } },
+            { $sort: { lessonCount: -1 } },
+            { $limit: 5 },
+          ])
+          .toArray(),
+        countsByDayLast7(db, "lessons", "createdAt"),
+        countsByDayLast7(db, "user", "createdAt"),
+      ]);
 
     res.json({
       totalUsers,
@@ -106,21 +116,18 @@ router.get("/stats", async (req, res) => {
       lessonGrowth,
       userGrowth,
     });
-  } catch (err) {
-    console.error("GET /api/admin/stats failed:", err);
-    res.status(500).json({ error: "Couldn't load admin stats." });
-  }
-});
+  })
+);
 
-router.get("/users", async (req, res) => {
-  try {
+// ---------- users ----------
+
+router.get(
+  "/users",
+  wrap(async (req, res) => {
     const db = req.db;
     const [users, lessonCounts] = await Promise.all([
       db.collection("user").find({}).sort({ createdAt: -1 }).toArray(),
-      db
-        .collection("lessons")
-        .aggregate([{ $group: { _id: "$creatorId", count: { $sum: 1 } } }])
-        .toArray(),
+      db.collection("lessons").aggregate([{ $group: { _id: "$creatorId", count: { $sum: 1 } } }]).toArray(),
     ]);
 
     const countByCreator = Object.fromEntries(lessonCounts.map((c) => [c._id, c.count]));
@@ -137,57 +144,40 @@ router.get("/users", async (req, res) => {
         createdAt: u.createdAt,
       })),
     });
-  } catch (err) {
-    console.error("GET /api/admin/users failed:", err);
-    res.status(500).json({ error: "Couldn't load users." });
-  }
-});
-router.patch("/users/:id/role", async (req, res) => {
-  try {
+  })
+);
+
+router.patch(
+  "/users/:id/role",
+  wrap(async (req, res) => {
     const { id } = req.params;
     const { role } = req.body;
-    if (!["user", "admin"].includes(role)) {
-      return res.status(400).json({ error: "Role must be user or admin." });
-    }
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({ error: "Invalid user id." });
-    }
+    if (!["user", "admin"].includes(role)) return res.status(400).json({ error: "Role must be user or admin." });
+    if (!isValidId(id, res, "user")) return;
 
-    const db = req.db;
-    const result = await db
-      .collection("user")
-      .updateOne({ _id: new ObjectId(id) }, { $set: { role } });
-    if (result.matchedCount === 0) {
-      return res.status(404).json({ error: "User not found." });
-    }
-
+    const result = await req.db.collection("user").updateOne({ _id: new ObjectId(id) }, { $set: { role } });
+    if (result.matchedCount === 0) return res.status(404).json({ error: "User not found." });
     res.json({ success: true, role });
-  } catch (err) {
-    console.error("PATCH /api/admin/users/:id/role failed:", err);
-    res.status(500).json({ error: "Couldn't update role." });
-  }
-});
+  })
+);
 
-router.delete("/users/:id", async (req, res) => {
-  try {
+router.delete(
+  "/users/:id",
+  wrap(async (req, res) => {
     const { id } = req.params;
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({ error: "Invalid user id." });
-    }
-    const db = req.db;
-    const result = await db.collection("user").deleteOne({ _id: new ObjectId(id) });
-    if (result.deletedCount === 0) {
-      return res.status(404).json({ error: "User not found." });
-    }
-    res.json({ success: true });
-  } catch (err) {
-    console.error("DELETE /api/admin/users/:id failed:", err);
-    res.status(500).json({ error: "Couldn't delete user." });
-  }
-});
+    if (!isValidId(id, res, "user")) return;
 
-router.get("/lessons", async (req, res) => {
-  try {
+    const result = await req.db.collection("user").deleteOne({ _id: new ObjectId(id) });
+    if (result.deletedCount === 0) return res.status(404).json({ error: "User not found." });
+    res.json({ success: true });
+  })
+);
+
+// ---------- lessons ----------
+
+router.get(
+  "/lessons",
+  wrap(async (req, res) => {
     const db = req.db;
     const { category = "", visibility = "", flagged = "" } = req.query;
 
@@ -195,166 +185,108 @@ router.get("/lessons", async (req, res) => {
     if (category && category !== "All") query.category = category;
     if (visibility && visibility !== "All") query.visibility = visibility;
 
-    const [lessons, reportCounts, publicCount, privateCount, flaggedLessonIds] =
-      await Promise.all([
-        db.collection("lessons").find(query).sort({ createdAt: -1 }).toArray(),
-        db
-          .collection("lessonsReports")
-          .aggregate([{ $group: { _id: "$lessonId", count: { $sum: 1 } } }])
-          .toArray(),
-        db.collection("lessons").countDocuments({ visibility: "Public" }),
-        db.collection("lessons").countDocuments({ visibility: "Private" }),
-        db.collection("lessonsReports").distinct("lessonId"),
-      ]);
+    const [lessons, reportCounts, publicCount, privateCount, flaggedLessonIds] = await Promise.all([
+      db.collection("lessons").find(query).sort({ createdAt: -1 }).toArray(),
+      db.collection("lessonsReports").aggregate([{ $group: { _id: "$lessonId", count: { $sum: 1 } } }]).toArray(),
+      db.collection("lessons").countDocuments({ visibility: "Public" }),
+      db.collection("lessons").countDocuments({ visibility: "Private" }),
+      db.collection("lessonsReports").distinct("lessonId"),
+    ]);
 
     const reportCountById = Object.fromEntries(reportCounts.map((r) => [r._id, r.count]));
     const flaggedSet = new Set(flaggedLessonIds);
 
-    let withReportCounts = lessons.map((l) => ({
-      ...l,
-      reportCount: reportCountById[l._id.toString()] || 0,
-    }));
+    let withReportCounts = lessons.map((l) => ({ ...l, reportCount: reportCountById[l._id.toString()] || 0 }));
+    if (flagged === "true") withReportCounts = withReportCounts.filter((l) => flaggedSet.has(l._id.toString()));
 
-    if (flagged === "true") {
-      withReportCounts = withReportCounts.filter((l) => flaggedSet.has(l._id.toString()));
-    }
+    res.json({ lessons: withReportCounts, stats: { publicCount, privateCount, flaggedCount: flaggedLessonIds.length } });
+  })
+);
 
-    res.json({
-      lessons: withReportCounts,
-      stats: {
-        publicCount,
-        privateCount,
-        flaggedCount: flaggedLessonIds.length,
-      },
-    });
-  } catch (err) {
-    console.error("GET /api/admin/lessons failed:", err);
-    res.status(500).json({ error: "Couldn't load lessons." });
-  }
-});
-router.patch("/lessons/:id/featured", async (req, res) => {
-  try {
+router.patch(
+  "/lessons/:id/featured",
+  wrap(async (req, res) => {
     const { id } = req.params;
     const { isFeatured } = req.body;
-    if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid lesson id." });
+    if (!isValidId(id, res)) return;
 
-    const db = req.db;
-    const result = await db
-      .collection("lessons")
-      .updateOne({ _id: new ObjectId(id) }, { $set: { isFeatured: Boolean(isFeatured) } });
+    const result = await req.db.collection("lessons").updateOne({ _id: new ObjectId(id) }, { $set: { isFeatured: Boolean(isFeatured) } });
     if (result.matchedCount === 0) return res.status(404).json({ error: "Lesson not found." });
-
     res.json({ success: true, isFeatured: Boolean(isFeatured) });
-  } catch (err) {
-    console.error("PATCH /api/admin/lessons/:id/featured failed:", err);
-    res.status(500).json({ error: "Couldn't update featured status." });
-  }
-});
+  })
+);
 
-router.patch("/lessons/:id/reviewed", async (req, res) => {
-  try {
+router.patch(
+  "/lessons/:id/reviewed",
+  wrap(async (req, res) => {
     const { id } = req.params;
     const { isReviewed } = req.body;
-    if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid lesson id." });
+    if (!isValidId(id, res)) return;
 
-    const db = req.db;
-    const result = await db
-      .collection("lessons")
-      .updateOne({ _id: new ObjectId(id) }, { $set: { isReviewed: Boolean(isReviewed) } });
+    const result = await req.db.collection("lessons").updateOne({ _id: new ObjectId(id) }, { $set: { isReviewed: Boolean(isReviewed) } });
     if (result.matchedCount === 0) return res.status(404).json({ error: "Lesson not found." });
-
     res.json({ success: true, isReviewed: Boolean(isReviewed) });
-  } catch (err) {
-    console.error("PATCH /api/admin/lessons/:id/reviewed failed:", err);
-    res.status(500).json({ error: "Couldn't update reviewed status." });
-  }
-});
+  })
+);
 
-router.delete("/lessons/:id", async (req, res) => {
-  try {
+router.delete(
+  "/lessons/:id",
+  wrap(async (req, res) => {
     const { id } = req.params;
-    if (!ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid lesson id." });
+    if (!isValidId(id, res)) return;
 
     const db = req.db;
     const result = await db.collection("lessons").deleteOne({ _id: new ObjectId(id) });
     if (result.deletedCount === 0) return res.status(404).json({ error: "Lesson not found." });
 
-    await db.collection("favorites").deleteMany({ lessonId: id });
-    await db.collection("comments").deleteMany({ lessonId: id });
-    await db.collection("lessonsReports").deleteMany({ lessonId: id });
-
+    await purgeLesson(db, id, { deleteLessonDoc: false }); // already deleted above
     res.json({ success: true });
-  } catch (err) {
-    console.error("DELETE /api/admin/lessons/:id failed:", err);
-    res.status(500).json({ error: "Couldn't delete lesson." });
-  }
-});
-router.get("/reports", async (req, res) => {
-  try {
+  })
+);
+
+// ---------- reports ----------
+
+router.get(
+  "/reports",
+  wrap(async (req, res) => {
     const db = req.db;
     const reports = await db.collection("lessonsReports").find({}).sort({ timestamp: -1 }).toArray();
     if (reports.length === 0) return res.json({ reportedLessons: [] });
 
     const lessonIds = [...new Set(reports.map((r) => r.lessonId))].filter(ObjectId.isValid);
-    const lessons = await db
-      .collection("lessons")
-      .find({ _id: { $in: lessonIds.map((id) => new ObjectId(id)) } })
-      .toArray();
+    const lessons = await db.collection("lessons").find({ _id: { $in: lessonIds.map((id) => new ObjectId(id)) } }).toArray();
     const lessonById = Object.fromEntries(lessons.map((l) => [l._id.toString(), l]));
 
     const grouped = {};
     for (const r of reports) {
       if (!grouped[r.lessonId]) {
-        grouped[r.lessonId] = {
-          lessonId: r.lessonId,
-          lessonTitle: lessonById[r.lessonId]?.title || "(lesson no longer exists)",
-          reportCount: 0,
-          reports: [],
-        };
+        grouped[r.lessonId] = { lessonId: r.lessonId, lessonTitle: lessonById[r.lessonId]?.title || "(lesson no longer exists)", reportCount: 0, reports: [] };
       }
       grouped[r.lessonId].reportCount += 1;
-      grouped[r.lessonId].reports.push({
-        reason: r.reason,
-        reporterUserId: r.reporterUserId,
-        reportedUserEmail: r.reportedUserEmail,
-        timestamp: r.timestamp,
-      });
+      grouped[r.lessonId].reports.push({ reason: r.reason, reporterUserId: r.reporterUserId, reportedUserEmail: r.reportedUserEmail, timestamp: r.timestamp });
     }
 
     res.json({ reportedLessons: Object.values(grouped) });
-  } catch (err) {
-    console.error("GET /api/admin/reports failed:", err);
-    res.status(500).json({ error: "Couldn't load reported lessons." });
-  }
-});
+  })
+);
 
-router.delete("/reports/:lessonId", async (req, res) => {
-  try {
+router.delete(
+  "/reports/:lessonId",
+  wrap(async (req, res) => {
     const { lessonId } = req.params;
-    if (!ObjectId.isValid(lessonId)) return res.status(400).json({ error: "Invalid lesson id." });
+    if (!isValidId(lessonId, res)) return;
 
-    const db = req.db;
-    await db.collection("lessons").deleteOne({ _id: new ObjectId(lessonId) });
-    await db.collection("favorites").deleteMany({ lessonId });
-    await db.collection("comments").deleteMany({ lessonId });
-    await db.collection("lessonsReports").deleteMany({ lessonId });
+    await purgeLesson(req.db, lessonId); // deletes the lesson doc too, unlike DELETE /lessons/:id above
+    res.json({ success: true });
+  })
+);
 
+router.post(
+  "/reports/:lessonId/ignore",
+  wrap(async (req, res) => {
+    await req.db.collection("lessonsReports").deleteMany({ lessonId: req.params.lessonId });
     res.json({ success: true });
-  } catch (err) {
-    console.error("DELETE /api/admin/reports/:lessonId failed:", err);
-    res.status(500).json({ error: "Couldn't delete lesson." });
-  }
-});
-router.post("/reports/:lessonId/ignore", async (req, res) => {
-  try {
-    const { lessonId } = req.params;
-    const db = req.db;
-    await db.collection("lessonsReports").deleteMany({ lessonId });
-    res.json({ success: true });
-  } catch (err) {
-    console.error("POST /api/admin/reports/:lessonId/ignore failed:", err);
-    res.status(500).json({ error: "Couldn't clear reports." });
-  }
-});
+  })
+);
 
 module.exports = router;

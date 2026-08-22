@@ -1,23 +1,9 @@
 const express = require("express");
 const { ObjectId } = require("mongodb");
 const { getDb } = require("../Db");
-
+const { verifyToken } = require("../middleware/verifyToken");
 const router = express.Router();
-
-/**
- * GET /api/favorites/mine?userId=...
- * -----------------------------------------------------------------------
- * Powers /dashboard/my-favorites. The `favorites` collection only
- * stores { userId, lessonId, savedAt } — this joins that against the
- * `lessons` collection so the frontend gets full lesson data (title,
- * category, creator, etc) in one call instead of fetching each lesson
- * individually.
- *
- * If a favorited lesson was since deleted by its owner, it's silently
- * skipped rather than erroring — the favorites doc becomes an orphan,
- * which is harmless and just means it won't show up here anymore.
- */
-router.get("/mine", async (req, res) => {
+router.get("/mine", verifyToken, async (req, res) => {
   try {
     const { userId } = req.query;
     if (!userId) {
